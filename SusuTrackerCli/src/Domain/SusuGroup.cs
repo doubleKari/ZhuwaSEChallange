@@ -2,13 +2,24 @@ namespace SusuTrackerCli.Domain;
 
 public sealed class SusuGroup
 {
-    private readonly List<Member> _members = new();
-    private readonly Dictionary<string, decimal> _paid = new(StringComparer.OrdinalIgnoreCase);
-    private readonly List<Payout> _payouts = new();
+    private readonly List<Member> _members;
+    private readonly Dictionary<string, decimal> _paid;
+    private readonly List<Payout> _payouts;
 
-    private SusuGroup(decimal weeklyAmount)
+    private SusuGroup(
+        decimal weeklyAmount,
+        GroupStatus status,
+        int currentWeek,
+        List<Member> members,
+        Dictionary<string, decimal> paid,
+        List<Payout> payouts)
     {
         WeeklyAmount = weeklyAmount;
+        Status = status;
+        CurrentWeek = currentWeek;
+        _members = members;
+        _paid = paid;
+        _payouts = payouts;
     }
 
     public decimal WeeklyAmount { get; }
@@ -35,8 +46,42 @@ public sealed class SusuGroup
     public static SusuGroup Create(decimal weeklyAmount)
     {
         MoneyRules.EnsurePositive(weeklyAmount, "Weekly contribution");
-        return new SusuGroup(weeklyAmount);
+        return new SusuGroup(
+            weeklyAmount,
+            GroupStatus.Forming,
+            currentWeek: 0,
+            new List<Member>(),
+            new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase),
+            new List<Payout>());
     }
+
+    public static SusuGroup Restore(
+        decimal weeklyAmount,
+        GroupStatus status,
+        int currentWeek,
+        IReadOnlyList<string> memberNames,
+        IReadOnlyDictionary<string, decimal> payments,
+        IReadOnlyList<Payout> payouts)
+    {
+        try
+        {
+            MoneyRules.EnsurePositive(weeklyAmount, "Weekly contribution");
+        }
+        catch (SusuException ex)
+        {
+            throw new SusuException($"The saved group is invalid: {ex.Message}");
+        }
+
+        var members = ReadMembers(memberNames);
+        var paid = ReadPayments(weeklyAmount, members, payments);
+        var history = ReadPayouts(weeklyAmount, members, payouts);
+        EnsureStateMatches(status, currentWeek, members, paid, history);
+
+        return new SusuGroup(weeklyAmount, status, currentWeek, members, paid, history);
+    }
+
+    public IReadOnlyDictionary<string, decimal> CopyPayments() =>
+        new Dictionary<string, decimal>(_paid, StringComparer.OrdinalIgnoreCase);
 
     public void AddMember(string name)
     {
@@ -247,6 +292,115 @@ public sealed class SusuGroup
         {
             lines.Add(
                 $"  Week {payout.WeekNumber}: {payout.RecipientName} received {MoneyRules.Format(payout.Amount)}");
+        }
+    }
+
+    private static List<Member> ReadMembers(IReadOnlyList<string> memberNames)
+    {
+        var members = new List<Member>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var name in memberNames)
+        {
+            if (string.IsNullOrWhiteSpace(name))
+                throw new SusuException("The saved group is invalid: a member name is missing.");
+
+            if (!seen.Add(name))
+                throw new SusuException($"The saved group is invalid: '{name}' is listed more than once.");
+
+            members.Add(new Member(name, members.Count + 1));
+        }
+
+        return members;
+    }
+
+    private static Dictionary<string, decimal> ReadPayments(
+        decimal weeklyAmount,
+        IReadOnlyList<Member> members,
+        IReadOnlyDictionary<string, decimal> payments)
+    {
+        var paid = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
+        foreach (var (name, amount) in payments)
+        {
+            var member = members.FirstOrDefault(candidate =>
+                candidate.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
+            if (member is null)
+                throw new SusuException($"The saved group is invalid: payment for unknown member '{name}'.");
+
+            if (!paid.TryAdd(member.Name, amount))
+                throw new SusuException($"The saved group is invalid: '{member.Name}' has more than one payment.");
+
+            try
+            {
+                MoneyRules.EnsurePositive(amount, "Payment");
+            }
+            catch (SusuException ex)
+            {
+                throw new SusuException($"The saved group is invalid: {ex.Message}");
+            }
+
+            if (amount > weeklyAmount)
+            {
+                throw new SusuException(
+                    $"The saved group is invalid: {member.Name} paid more than the weekly contribution.");
+            }
+        }
+
+        return paid;
+    }
+
+    private static List<Payout> ReadPayouts(
+        decimal weeklyAmount,
+        IReadOnlyList<Member> members,
+        IReadOnlyList<Payout> payouts)
+    {
+        if (payouts.Count > members.Count)
+            throw new SusuException("The saved group is invalid: payout history is longer than the member list.");
+
+        var expectedPot = weeklyAmount * members.Count;
+        var history = new List<Payout>(payouts.Count);
+        for (var i = 0; i < payouts.Count; i++)
+        {
+            var payout = payouts[i];
+            var week = i + 1;
+            if (payout.WeekNumber != week
+                || payout.RecipientName != members[i].Name
+                || payout.Amount != expectedPot)
+            {
+                throw new SusuException(
+                    "The saved group is invalid: payout history does not match the member order.");
+            }
+
+            history.Add(payout);
+        }
+
+        return history;
+    }
+
+    private static void EnsureStateMatches(
+        GroupStatus status,
+        int currentWeek,
+        IReadOnlyList<Member> members,
+        Dictionary<string, decimal> paid,
+        IReadOnlyList<Payout> payouts)
+    {
+        switch (status)
+        {
+            case GroupStatus.Forming when currentWeek == 0 && paid.Count == 0 && payouts.Count == 0:
+                return;
+            case GroupStatus.Active
+                when members.Count >= 2
+                && currentWeek >= 1
+                && currentWeek <= members.Count
+                && payouts.Count == currentWeek - 1:
+                return;
+            case GroupStatus.Completed
+                when members.Count >= 2
+                && currentWeek == members.Count
+                && payouts.Count == members.Count
+                && paid.Count == 0:
+                return;
+            default:
+                throw new SusuException("The saved group is invalid: the week does not match the group status.");
         }
     }
 }
