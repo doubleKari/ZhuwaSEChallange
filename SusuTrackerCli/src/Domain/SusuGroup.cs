@@ -127,6 +127,15 @@ public sealed class SusuGroup
         return CloseWeekResult.Paid(payout);
     }
 
+    public string Report() =>
+        Status switch
+        {
+            GroupStatus.Forming => RosterReport("Status: forming", "No week is open yet."),
+            GroupStatus.Active => ActiveReport(),
+            GroupStatus.Completed => RosterReport("Status: completed", note: null),
+            _ => throw new InvalidOperationException($"Unexpected status {Status}.")
+        };
+
     public decimal AmountPaid(string memberName)
     {
         if (string.IsNullOrWhiteSpace(memberName))
@@ -168,4 +177,76 @@ public sealed class SusuGroup
 
     private Member RequireMember(string name) =>
         FindMember(name) ?? throw new SusuException($"Unknown member '{name}'.");
+
+    private string ActiveReport()
+    {
+        var lines = new List<string>
+        {
+            $"Week: {CurrentWeek} (open)",
+            $"Weekly contribution: {MoneyRules.Format(WeeklyAmount)} GHS",
+            $"Next payout: {NextRecipientName}",
+            "",
+            "Paid in full:"
+        };
+
+        var paidInFull = _members.Where(member => PaidBy(member) == WeeklyAmount).ToList();
+        if (paidInFull.Count == 0)
+            lines.Add("  (none)");
+        else
+            foreach (var member in paidInFull)
+                lines.Add($"  {member.Name} {MoneyRules.Format(PaidBy(member))}");
+
+        lines.Add("");
+        lines.Add("Still owing:");
+        var debts = OutstandingDebts();
+        if (debts.Count == 0)
+            lines.Add("  (none)");
+        else
+            foreach (var debt in debts)
+                lines.Add($"  {debt.MemberName} owes {MoneyRules.Format(debt.Amount)}");
+
+        lines.Add("");
+        lines.Add("Payout history:");
+        AppendPayouts(lines);
+        return string.Join('\n', lines);
+    }
+
+    private string RosterReport(string statusLine, string? note)
+    {
+        var lines = new List<string>
+        {
+            statusLine,
+            $"Weekly contribution: {MoneyRules.Format(WeeklyAmount)} GHS",
+            "Members:"
+        };
+
+        if (_members.Count == 0)
+            lines.Add("  (none)");
+        else
+            foreach (var member in _members)
+                lines.Add($"  {member.JoinOrder}. {member.Name}");
+
+        if (note is not null)
+            lines.Add(note);
+
+        lines.Add("");
+        lines.Add("Payout history:");
+        AppendPayouts(lines);
+        return string.Join('\n', lines);
+    }
+
+    private void AppendPayouts(List<string> lines)
+    {
+        if (_payouts.Count == 0)
+        {
+            lines.Add("  (none)");
+            return;
+        }
+
+        foreach (var payout in _payouts)
+        {
+            lines.Add(
+                $"  Week {payout.WeekNumber}: {payout.RecipientName} received {MoneyRules.Format(payout.Amount)}");
+        }
+    }
 }
