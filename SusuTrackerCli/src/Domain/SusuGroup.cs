@@ -4,6 +4,7 @@ public sealed class SusuGroup
 {
     private readonly List<Member> _members = new();
     private readonly Dictionary<string, decimal> _paid = new(StringComparer.OrdinalIgnoreCase);
+    private readonly List<Payout> _payouts = new();
 
     private SusuGroup(decimal weeklyAmount)
     {
@@ -17,6 +18,19 @@ public sealed class SusuGroup
     public int CurrentWeek { get; private set; }
 
     public IReadOnlyList<Member> Members => _members;
+
+    public IReadOnlyList<Payout> Payouts => _payouts;
+
+    public string NextRecipientName
+    {
+        get
+        {
+            if (Status != GroupStatus.Active)
+                throw new SusuException("There is no open week.");
+
+            return _members[CurrentWeek - 1].Name;
+        }
+    }
 
     public static SusuGroup Create(decimal weeklyAmount)
     {
@@ -88,6 +102,31 @@ public sealed class SusuGroup
         _paid[member.Name] = paid + amount;
     }
 
+    public CloseWeekResult CloseWeek()
+    {
+        if (Status == GroupStatus.Completed)
+            throw new SusuException("The cycle is already complete.");
+
+        if (Status != GroupStatus.Active)
+            throw new SusuException("Start the cycle before closing a week.");
+
+        var debts = OutstandingDebts();
+        if (debts.Count > 0)
+            return CloseWeekResult.Blocked(debts);
+
+        var recipient = _members[CurrentWeek - 1];
+        var payout = new Payout(CurrentWeek, recipient.Name, WeeklyAmount * _members.Count);
+        _payouts.Add(payout);
+        _paid.Clear();
+
+        if (CurrentWeek == _members.Count)
+            Status = GroupStatus.Completed;
+        else
+            CurrentWeek++;
+
+        return CloseWeekResult.Paid(payout);
+    }
+
     public decimal AmountPaid(string memberName)
     {
         if (string.IsNullOrWhiteSpace(memberName))
@@ -105,6 +144,19 @@ public sealed class SusuGroup
             throw new SusuException("Start the cycle before recording payments.");
 
         return WeeklyAmount - AmountPaid(memberName);
+    }
+
+    private List<Debt> OutstandingDebts()
+    {
+        var debts = new List<Debt>();
+        foreach (var member in _members)
+        {
+            var owed = WeeklyAmount - PaidBy(member);
+            if (owed > 0)
+                debts.Add(new Debt(member.Name, owed));
+        }
+
+        return debts;
     }
 
     private decimal PaidBy(Member member) =>
