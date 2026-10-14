@@ -1,3 +1,4 @@
 <Solution>
   <Project Path="SusuTrackerCli/SusuTrackerCli.csproj" />
+  <Project Path="SusuTrackerCli.Tests/SusuTrackerCli.Tests.csproj" />
 </Solution>
